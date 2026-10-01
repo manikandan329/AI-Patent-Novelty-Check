@@ -1,0 +1,1 @@
+# AI-Patent-Novelty-Check
