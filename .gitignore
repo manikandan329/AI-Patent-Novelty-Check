@@ -1,0 +1,8 @@
+node_modules/
+ml_env/
+.env
+dist/
+__pycache__/
+*.pyc
+ml/data/
+server/main_backup.py

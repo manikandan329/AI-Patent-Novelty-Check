@@ -1,93 +1,70 @@
-import { doc, setDoc, getDoc, collection, getDocs } from 'firebase/firestore';
+import { doc, setDoc, getDocs, collection, deleteDoc } from 'firebase/firestore';
 import { db, isFirebaseConfigured } from '../firebase/config';
 import { parsePatentSections } from './patentDocumentProcessor';
-import { EXTENDED_PATENT_KNOWLEDGE_BASE } from './patentResearchService';
 
-/**
- * AI PATENT NOVELTY ANALYSIS SERVICE (Module 15)
- * Combines Gemini AI claim processing, semantic prior-art matching,
- * claim-to-prior-art mapping, and novelty assessment.
- */
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
 export const DISCLAIMER_TEXT =
-  "AI-assisted preliminary novelty analysis. This report is an automated research assessment and does not constitute a formal legal opinion or guarantee patentability.";
+  'AI-assisted preliminary novelty analysis. This report is an automated research assessment and does not constitute a formal legal opinion or guarantee patentability.';
 
-/**
- * Reads text content from uploaded text/PDF file using browser FileReader.
- */
 export const extractTextFromFile = async (file) => {
-  if (!file) return { success: false, error: 'No file provided.' };
+  if (!file) {
+    return {
+      success: false,
+      error: 'No file provided.'
+    };
+  }
 
   return new Promise((resolve) => {
     const reader = new FileReader();
 
     reader.onload = (e) => {
       const text = e.target.result;
+
       if (!text || typeof text !== 'string') {
-        resolve({ success: false, error: 'Could not extract readable text from document.' });
+        resolve({
+          success: false,
+          error: 'Could not extract readable text from document.'
+        });
         return;
       }
 
       const parsedSections = parsePatentSections(text);
+
       resolve({
         success: true,
         rawText: text,
-        parsedSections,
+        parsedSections
       });
     };
 
     reader.onerror = () => {
-      resolve({ success: false, error: 'Error reading file contents.' });
+      resolve({
+        success: false,
+        error: 'Error reading file contents.'
+      });
     };
 
-    // Read file as plain text (works for TXT, MD, JSON, and text-embedded documents)
     reader.readAsText(file);
   });
 };
 
-/**
- * Breaks down raw claims text into structured independent & dependent claims.
- */
 export const parseClaimsToStructure = (claimsText) => {
   if (!claimsText || typeof claimsText !== 'string') {
-    return [
-      {
-        id: 'claim-1',
-        number: 1,
-        type: 'Independent',
-        text: '1. A quantum micro-fluidic neural processing unit comprising a semiconductor substrate, a plurality of dielectric coolant channels, and a gate-oxide integrated laminar flow routing matrix.',
-        features: [
-          'Semiconductor substrate with integrated neural processing units',
-          'Micro-fluidic dielectric coolant channels',
-          'On-chip gate-oxide integrated laminar flow routing matrix',
-          'Closed-loop thermal management feedback sensor array',
-        ],
-      },
-      {
-        id: 'claim-2',
-        number: 2,
-        type: 'Dependent (Claim 1)',
-        text: '2. The processing unit of claim 1, wherein the dielectric coolant channels have a sub-microliter cross-sectional hydraulic diameter between 50 nm and 200 nm.',
-        features: [
-          'Sub-microliter cross-sectional hydraulic diameter (50-200 nm)',
-          'Piezo-electric micro-pump impulse modulation',
-        ],
-      },
-      {
-        id: 'claim-3',
-        number: 3,
-        type: 'Dependent (Claim 1)',
-        text: '3. The processing unit of claim 1, further comprising a zero-knowledge edge cryptographic key exchange controller configured to encrypt sensor telemetry.',
-        features: [
-          'Zero-knowledge edge cryptographic key exchange controller',
-          'Encrypted real-time thermal sensor telemetry',
-        ],
-      },
-    ];
+    return [];
   }
 
-  // Regex split for numbered claims
-  const claimBlocks = claimsText.split(/(?=\bClaim\s+\d+|\b\d+\.\s+)/i).filter((c) => c.trim().length > 5);
+  const cleanedClaims = claimsText.trim();
+
+  if (!cleanedClaims) {
+    return [];
+  }
+
+  const claimBlocks = cleanedClaims
+    .split(/(?=\bClaim\s+\d+|\b\d+\.\s+)/i)
+    .map((claim) => claim.trim())
+    .filter((claim) => claim.length > 5);
 
   if (claimBlocks.length === 0) {
     return [
@@ -95,311 +72,536 @@ export const parseClaimsToStructure = (claimsText) => {
         id: 'claim-1',
         number: 1,
         type: 'Independent',
-        text: claimsText.trim(),
-        features: extractFeaturesFromText(claimsText),
-      },
+        text: cleanedClaims,
+        features: extractFeaturesFromText(cleanedClaims)
+      }
     ];
   }
 
-  return claimBlocks.map((block, idx) => {
-    const num = idx + 1;
-    const isDependent = /wherein|of claim|according to claim/i.test(block);
-    const type = isDependent ? `Dependent (Claim ${Math.max(1, num - 1)})` : 'Independent';
+  return claimBlocks.map((block, index) => {
+    const numberMatch = block.match(/^(?:Claim\s+)?(\d+)\./i);
+    const number = numberMatch
+      ? Number(numberMatch[1])
+      : index + 1;
+
+    const isDependent =
+      /wherein|of claim|according to claim|claim \d+/i.test(block);
 
     return {
-      id: `claim-${num}`,
-      number: num,
-      type,
-      text: block.trim(),
-      features: extractFeaturesFromText(block),
+      id: `claim-${number}`,
+      number,
+      type: isDependent
+        ? 'Dependent'
+        : 'Independent',
+      text: block,
+      features: extractFeaturesFromText(block)
     };
   });
 };
 
-/**
- * Helper to extract key technical features from claim sentences.
- */
 function extractFeaturesFromText(text) {
   const sentences = text
+    .replace(/^\s*(?:Claim\s+)?\d+\.\s*/i, '')
     .split(/[,;.\n]/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 12 && !/^(1|2|3|4|5|claim|comprising|wherein|a|an|the)$/i.test(s));
+    .map((item) => item.trim())
+    .filter((item) => item.length > 12);
 
   if (sentences.length > 0) {
     return sentences.slice(0, 4);
   }
 
-  return [
-    'Primary technical apparatus assembly',
-    'Integrated control algorithm & signal routing',
-    'Sensory feedback loop actuation mechanism',
-  ];
+  return [text.trim()];
 }
 
-/**
- * Searches prior art data source for matches against submitted patent.
- */
-export const searchPriorArtMatches = (patentData) => {
-  const query = `${patentData.title || ''} ${patentData.abstract || ''} ${patentData.claims || ''}`.toLowerCase();
+export const searchPriorArtMatches = async (patentData) => {
+  const title = patentData?.title?.trim() || '';
+  const abstract = patentData?.abstract?.trim() || '';
 
-  // Search through EXTENDED_PATENT_KNOWLEDGE_BASE
-  const matches = EXTENDED_PATENT_KNOWLEDGE_BASE.map((patent) => {
-    let score = 45.0; // Baseline
-    const titleMatch = patent.title.toLowerCase();
-    const abstractMatch = patent.abstract.toLowerCase();
-
-    // Key technical overlap scoring
-    if (query.includes('quantum') || titleMatch.includes('quantum')) score += 20;
-    if (query.includes('fluidic') || titleMatch.includes('fluidic') || abstractMatch.includes('coolant')) score += 25;
-    if (query.includes('autonomous') || query.includes('drone') || titleMatch.includes('swarm')) score += 18;
-    if (query.includes('sensor') || query.includes('graphene') || titleMatch.includes('glucose')) score += 15;
-    if (query.includes('crypto') || query.includes('key') || titleMatch.includes('cryptographic')) score += 22;
-
-    const similarityScore = Math.min(Math.round((score + Math.random() * 8) * 10) / 10, 95.8);
-
-    return {
-      id: patent.id,
-      patentNumber: patent.patentNumber,
-      title: patent.title,
-      applicant: patent.applicant,
-      publicationDate: patent.publicationDate,
-      source: patent.patentNumber.startsWith('US') ? 'USPTO' : patent.patentNumber.startsWith('EP') ? 'EPO' : 'WIPO',
-      similarityScore,
-      relevantMatchingFeatures: patent.keyClaims.slice(0, 3),
-      abstract: patent.abstract,
-    };
-  });
-
-  // Sort descending by similarity score
-  return matches.sort((a, b) => b.similarityScore - a.similarityScore);
-};
-
-/**
- * Maps claims and individual technical features to matching prior art.
- */
-export const buildClaimToPriorArtMapping = (structuredClaims, priorArtList) => {
-  const topPatentA = priorArtList[0] || { patentNumber: 'US-2026-0098412-A1', title: 'Quantum Micro-Fluidic Neural Processing Unit' };
-  const topPatentB = priorArtList[1] || { patentNumber: 'US-2026-0084719-A1', title: 'Autonomous Swarm Mesh Network' };
-
-  return structuredClaims.map((claim) => {
-    const mappedFeatures = claim.features.map((feature, fIdx) => {
-      if (fIdx === 0) {
-        return {
-          featureName: feature,
-          status: 'Disclosed in Prior Art',
-          matchedPatent: topPatentA.patentNumber,
-          matchedTitle: topPatentA.title,
-          similarityScore: 92.4,
-          matchType: 'Exact Match',
-        };
-      } else if (fIdx === 1) {
-        return {
-          featureName: feature,
-          status: 'Disclosed in Prior Art',
-          matchedPatent: topPatentA.patentNumber,
-          matchedTitle: topPatentA.title,
-          similarityScore: 84.6,
-          matchType: 'Structural Overlap',
-        };
-      } else if (fIdx === 2) {
-        return {
-          featureName: feature,
-          status: 'Partially Disclosed',
-          matchedPatent: topPatentB.patentNumber,
-          matchedTitle: topPatentB.title,
-          similarityScore: 62.0,
-          matchType: 'Partial Overlap',
-        };
-      } else {
-        return {
-          featureName: feature,
-          status: 'No Strong Prior-Art Match',
-          matchedPatent: 'None',
-          matchedTitle: 'Novel Technical Distinction',
-          similarityScore: 12.5,
-          matchType: 'Distinctive Inventive Step',
-        };
-      }
-    });
-
-    return {
-      claimNumber: claim.number,
-      claimType: claim.type,
-      claimText: claim.text,
-      featureMappings: mappedFeatures,
-    };
-  });
-};
-
-/**
- * Calculates overall Novelty Score & Status.
- */
-export const calculateNoveltyScore = (topSimilarityScore) => {
-  // Higher prior art similarity = Lower Novelty
-  const rawNovelty = Math.max(100.0 - (topSimilarityScore * 0.92 - 6), 34.0);
-  const noveltyScore = Math.round(rawNovelty * 10) / 10;
-
-  let noveltyStatus = 'High Novelty';
-  let badgeVariant = 'success';
-  let confidenceLevel = 'High Confidence (94.2%)';
-
-  if (noveltyScore >= 85) {
-    noveltyStatus = 'High Novelty';
-    badgeVariant = 'success';
-  } else if (noveltyScore >= 65) {
-    noveltyStatus = 'Moderate Novelty';
-    badgeVariant = 'primary';
-  } else if (noveltyScore >= 45) {
-    noveltyStatus = 'Low Novelty';
-    badgeVariant = 'warning';
-  } else {
-    noveltyStatus = 'Potentially Not Novel';
-    badgeVariant = 'danger';
+  if (!title || !abstract) {
+    throw new Error('Patent title and abstract are required.');
   }
 
-  return { noveltyScore, noveltyStatus, badgeVariant, confidenceLevel };
+  const response = await fetch(
+    `${API_BASE_URL}/api/novelty/analyze`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        title,
+        abstract,
+        top_k: 5
+      })
+    }
+  );
+
+  if (!response.ok) {
+    const errorData = await response
+      .json()
+      .catch(() => ({}));
+
+    throw new Error(
+      errorData.detail ||
+        `Patent ML analysis failed with status ${response.status}.`
+    );
+  }
+
+  const data = await response.json();
+
+  return (data.results || []).map((patent) => ({
+    id: patent.patentId,
+    patentNumber: patent.patentId,
+    title: patent.title,
+    applicant: 'HUPD Patent Dataset',
+    publicationDate: 'Dataset record',
+    source: patent.source || 'HUPD patent dataset',
+    similarityScore: patent.overallSimilarityPercent,
+    overallSimilarity: patent.overallSimilarityPercent,
+    titleSimilarity: patent.titleSimilarityPercent,
+    abstractSimilarity: patent.abstractSimilarityPercent,
+    technicalRelatedness: patent.technicalRelatedness,
+    similarityLevel: patent.similarityLevel,
+    relevantMatchingFeatures: [
+      `Overall similarity: ${patent.overallSimilarityPercent}%`,
+      `Title similarity: ${patent.titleSimilarityPercent}%`,
+      `Abstract similarity: ${patent.abstractSimilarityPercent}%`,
+      `Technical relatedness: ${patent.technicalRelatedness}`
+    ],
+    abstract:
+      patent.abstract ||
+      'Patent abstract was not returned by the ML API.'
+  }));
 };
 
-/**
- * Executes full AI Patent Novelty Analysis with multi-step progress updates.
- */
+export const buildClaimToPriorArtMapping = (
+  structuredClaims,
+  priorArtList
+) => {
+  if (!structuredClaims.length) {
+    return [];
+  }
+
+  const topMatch = priorArtList[0] || null;
+
+  return structuredClaims.map((claim) => ({
+    claimNumber: claim.number,
+    claimType: claim.type,
+    claimText: claim.text,
+    featureMappings: [
+      {
+        featureName:
+          'Document-level ML screening evidence',
+        status: topMatch
+          ? 'Potential Technical Overlap'
+          : 'No Retrieved Match',
+        matchedPatent:
+          topMatch?.patentNumber || 'None',
+        matchedTitle:
+          topMatch?.title ||
+          'No matching patent retrieved',
+        similarityScore:
+          topMatch?.similarityScore || 0,
+        matchType:
+          topMatch
+            ? 'Document-Level Similarity'
+            : 'No Match'
+      }
+    ]
+  }));
+};
+
+export const calculateNoveltyScore = () => {
+  return {
+    noveltyScore: null,
+    noveltyStatus: 'Preliminary Screening',
+    badgeVariant: 'primary',
+    confidenceLevel: 'Not a legal confidence score'
+  };
+};
+
 export const runFullPatentNoveltyAnalysis = async (
   patentInput,
   progressCallback = () => {},
   isDemo = false
 ) => {
-  // Step 1: Extract & Validate
-  progressCallback({ step: 1, message: 'Extracting patent title, abstract, and claim structure...', progress: 20 });
-  await new Promise((r) => setTimeout(r, 600));
+  const title =
+    patentInput?.title?.trim() || '';
 
-  const claimsList = parseClaimsToStructure(patentInput.claims);
+  const abstract =
+    patentInput?.abstract?.trim() || '';
 
-  // Step 2: Gemini AI Claim Analysis
-  progressCallback({ step: 2, message: 'Executing Gemini AI claim feature extraction & concept breakdown...', progress: 40 });
-  await new Promise((r) => setTimeout(r, 800));
+  if (!title) {
+    throw new Error(
+      'Patent title is required.'
+    );
+  }
 
-  // Step 3: Prior Art Search
-  progressCallback({ step: 3, message: 'Searching USPTO, EPO, and WIPO vector database for prior art...', progress: 60 });
-  await new Promise((r) => setTimeout(r, 700));
+  if (!abstract) {
+    throw new Error(
+      'Patent abstract is required for ML analysis.'
+    );
+  }
 
-  const priorArtMatches = searchPriorArtMatches(patentInput);
-  const topMatch = priorArtMatches[0] || { similarityScore: 88.5 };
+  progressCallback({
+    step: 1,
+    message:
+      'Validating patent title and abstract...',
+    progress: 20
+  });
 
-  // Step 4: Semantic Claim-to-Prior-Art Mapping
-  progressCallback({ step: 4, message: 'Computing semantic claim-to-prior-art feature mapping tree...', progress: 80 });
-  await new Promise((r) => setTimeout(r, 700));
+  await new Promise((resolve) =>
+    setTimeout(resolve, 250)
+  );
 
-  const claimMapping = buildClaimToPriorArtMapping(claimsList, priorArtMatches);
-  const { noveltyScore, noveltyStatus, badgeVariant, confidenceLevel } = calculateNoveltyScore(topMatch.similarityScore);
+  progressCallback({
+    step: 2,
+    message:
+      'Applying TF-IDF feature transformation...',
+    progress: 40
+  });
 
-  // Step 5: AI Explanation & Recommendations
-  progressCallback({ step: 5, message: 'Synthesizing AI novelty rationale and strategic filing recommendations...', progress: 100 });
-  await new Promise((r) => setTimeout(r, 500));
+  await new Promise((resolve) =>
+    setTimeout(resolve, 250)
+  );
 
-  const analysisId = `novelty_ana_${Date.now()}`;
-  const nowISO = new Date().toISOString();
+  progressCallback({
+    step: 3,
+    message:
+      'Searching 11,532 patent records...',
+    progress: 60
+  });
+
+  const response = await fetch(
+    `${API_BASE_URL}/api/novelty/analyze`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        title,
+        abstract,
+        top_k: 5
+      })
+    }
+  );
+
+  if (!response.ok) {
+    const errorData = await response
+      .json()
+      .catch(() => ({}));
+
+    throw new Error(
+      errorData.detail ||
+        `Patent ML analysis failed with status ${response.status}.`
+    );
+  }
+
+  const mlResult = await response.json();
+
+  progressCallback({
+    step: 4,
+    message:
+      'Applying Logistic Regression relatedness analysis...',
+    progress: 80
+  });
+
+  await new Promise((resolve) =>
+    setTimeout(resolve, 250)
+  );
+
+  const claimsList =
+    parseClaimsToStructure(
+      patentInput?.claims || ''
+    );
+
+  const priorArtMatches =
+    (mlResult.results || []).map(
+      (patent) => ({
+        id: patent.patentId,
+        patentNumber: patent.patentId,
+        title: patent.title,
+        applicant: 'HUPD Patent Dataset',
+        publicationDate: 'Dataset record',
+        source:
+          patent.source ||
+          'HUPD patent dataset',
+        similarityScore:
+          patent.overallSimilarityPercent,
+        overallSimilarity:
+          patent.overallSimilarityPercent,
+        titleSimilarity:
+          patent.titleSimilarityPercent,
+        abstractSimilarity:
+          patent.abstractSimilarityPercent,
+        technicalRelatedness:
+          patent.technicalRelatedness,
+        similarityLevel:
+          patent.similarityLevel,
+        relevantMatchingFeatures: [
+          `Overall similarity: ${patent.overallSimilarityPercent}%`,
+          `Title similarity: ${patent.titleSimilarityPercent}%`,
+          `Abstract similarity: ${patent.abstractSimilarityPercent}%`,
+          `Technical relatedness: ${patent.technicalRelatedness}`
+        ],
+        abstract:
+          patent.abstract ||
+          'Patent abstract was not returned by the ML API.'
+      })
+    );
+
+  const claimMapping =
+    buildClaimToPriorArtMapping(
+      claimsList,
+      priorArtMatches
+    );
+
+  const topMatch =
+    priorArtMatches[0] || null;
+
+  const highestSimilarity =
+    Number(
+      mlResult.highestSimilarityPercent || 0
+    );
+
+  progressCallback({
+    step: 5,
+    message:
+      'Preparing preliminary screening report...',
+    progress: 100
+  });
+
+  await new Promise((resolve) =>
+    setTimeout(resolve, 250)
+  );
+
+  const analysisId =
+    `ml_novelty_${Date.now()}`;
+
+  const nowISO =
+    new Date().toISOString();
 
   const result = {
     id: analysisId,
-    title: patentInput.title || 'Untitled Patent Spec',
-    inventor: patentInput.inventor || 'Patent Researcher',
-    abstract: patentInput.abstract || 'Specification details submitted for novelty review.',
-    claimsRaw: patentInput.claims || '',
+    title,
+    inventor:
+      patentInput?.inventor?.trim() || '',
+    abstract,
+    claimsRaw:
+      patentInput?.claims || '',
     analysisDate: nowISO,
-    noveltyScore,
-    noveltyStatus,
-    badgeVariant,
-    confidenceLevel,
-    overallSimilarityScore: topMatch.similarityScore,
-    claimsAnalyzedCount: claimsList.length,
-    relevantPriorArtCount: priorArtMatches.length,
 
-    // Detailed Sections
+    noveltyScore: null,
+
+    noveltyStatus:
+      mlResult.screeningResult ||
+      'UNKNOWN',
+
+    badgeVariant:
+      highestSimilarity >= 40
+        ? 'danger'
+        : highestSimilarity >= 20
+        ? 'warning'
+        : 'success',
+
+    confidenceLevel:
+      'Logistic Regression document-level screening',
+
+    overallSimilarityScore:
+      highestSimilarity,
+
+    claimsAnalyzedCount:
+      claimsList.length,
+
+    relevantPriorArtCount:
+      priorArtMatches.length,
+
+    mlModel:
+      'Logistic Regression',
+
+    screeningResult:
+      mlResult.screeningResult ||
+      'UNKNOWN',
+
     claimsList,
+
     priorArtMatches,
+
     claimMapping,
 
     aiExplanation: {
-      noveltyRationale: `The submitted invention exhibits strong patentability potential (${noveltyScore}% Novelty Score). While reference ${topMatch.patentNumber} (${topMatch.title}) discloses general micro-fluidic channels (${topMatch.similarityScore}% overlap), your specified direct gate-oxide laminar coolant integration appears distinctive and absent from cited prior art.`,
-      disclosedFeatures: [
-        `Micro-fluidic dielectric coolant channels (Disclosed in ${topMatch.patentNumber})`,
-        'Closed-loop thermal management sensor feedback (Standard in semiconductor prior art)',
-      ],
+      noveltyRationale:
+        topMatch
+          ? `The ML screening identified a highest document-level similarity of ${highestSimilarity}% with ${topMatch.patentNumber} (${topMatch.title}). This indicates potential technical overlap and should be reviewed at the claim level. It does not establish lack of novelty.`
+          : 'The ML screening did not retrieve a sufficiently similar patent record from the available corpus.',
+
+      disclosedFeatures: priorArtMatches
+        .slice(0, 3)
+        .map(
+          (patent) =>
+            `${patent.title} (${patent.similarityScore}% overall similarity)`
+        ),
+
       distinctiveFeatures: [
-        'Gate-oxide integrated sub-nanometer coolant routing channel layout',
-        'Zero-knowledge encrypted real-time thermal telemetry bus for edge microcontrollers',
+        'The current model performs document-level title and abstract screening.',
+        'The model does not determine legal claim-level anticipation.',
+        'Further claim-by-claim comparison is recommended.'
       ],
-      mostRelevantDocuments: priorArtMatches.slice(0, 3).map((p) => `${p.patentNumber}: ${p.title} (${p.similarityScore}% similarity)`),
+
+      mostRelevantDocuments:
+        priorArtMatches
+          .slice(0, 3)
+          .map(
+            (patent) =>
+              `${patent.patentNumber}: ${patent.title} (${patent.similarityScore}% similarity)`
+          )
     },
 
     recommendations: [
-      `Review highly similar prior-art document ${topMatch.patentNumber} (${topMatch.title}) before filing.`,
-      'Refine independent claim 1 to explicitly emphasize the direct gate-oxide dielectric substrate etching method.',
-      'Add dependent claims quantifying the operational sub-nanometer coolant flow velocity and thermal dissipation limits.',
-      'Perform additional global prior-art searching in WIPO International PCT database prior to non-provisional filing.',
+      'Review the highest-similarity patent record in detail.',
+      'Compare the independent claims of the invention with the retrieved prior-art documents.',
+      'Perform a broader prior-art search using additional technical keywords.',
+      'Do not treat document similarity as a legal probability of patentability.',
+      'Obtain professional patent examination or legal advice before filing decisions.'
     ],
 
-    disclaimer: DISCLAIMER_TEXT,
-    isDemo,
+    disclaimer:
+      mlResult.disclaimer ||
+      DISCLAIMER_TEXT,
+
+    isDemo
   };
 
-  // Persist analysis in localStorage and Firestore
   try {
-    const existing = JSON.parse(localStorage.getItem('patentiq_novelty_analyses') || '[]');
+    const existing =
+      JSON.parse(
+        localStorage.getItem(
+          'patentiq_novelty_analyses'
+        ) || '[]'
+      );
+
     existing.unshift(result);
-    localStorage.setItem('patentiq_novelty_analyses', JSON.stringify(existing));
+
+    localStorage.setItem(
+      'patentiq_novelty_analyses',
+      JSON.stringify(existing)
+    );
 
     if (isFirebaseConfigured) {
-      const docRef = doc(db, 'patent_novelty_analyses', analysisId);
-      await setDoc(docRef, result);
+      const docRef = doc(
+        db,
+        'patent_novelty_analyses',
+        analysisId
+      );
+
+      await setDoc(
+        docRef,
+        result
+      );
     }
   } catch (err) {
-    console.warn('Novelty analysis storage notice:', err.message);
+    console.warn(
+      'Novelty analysis storage notice:',
+      err.message
+    );
   }
 
   return result;
 };
 
-/**
- * Fetches all saved novelty analysis history.
- */
-export const getNoveltyAnalysisHistory = async () => {
-  const localData = JSON.parse(localStorage.getItem('patentiq_novelty_analyses') || '[]');
+export const getNoveltyAnalysisHistory =
+  async () => {
+    const localData =
+      JSON.parse(
+        localStorage.getItem(
+          'patentiq_novelty_analyses'
+        ) || '[]'
+      );
 
-  if (isFirebaseConfigured) {
+    if (isFirebaseConfigured) {
+      try {
+        const querySnap =
+          await getDocs(
+            collection(
+              db,
+              'patent_novelty_analyses'
+            )
+          );
+
+        const dbList = [];
+
+        querySnap.forEach(
+          (docSnap) =>
+            dbList.push(docSnap.data())
+        );
+
+        if (dbList.length > 0) {
+          return dbList.sort(
+            (a, b) =>
+              new Date(b.analysisDate) -
+              new Date(a.analysisDate)
+          );
+        }
+      } catch (e) {
+        console.warn(
+          'Firestore fetch novelty history notice:',
+          e.message
+        );
+      }
+    }
+
+    return localData;
+  };
+
+export const getNoveltyAnalysisById =
+  async (analysisId) => {
+    const history =
+      await getNoveltyAnalysisHistory();
+
+    return (
+      history.find(
+        (item) => item.id === analysisId
+      ) || null
+    );
+  };
+
+export async function deleteNoveltyAnalysis(
+  id
+) {
+  const localData =
+    JSON.parse(
+      localStorage.getItem(
+        'patentiq_novelty_analyses'
+      ) || '[]'
+    );
+
+  const updated =
+    localData.filter(
+      (item) => item.id !== id
+    );
+
+  localStorage.setItem(
+    'patentiq_novelty_analyses',
+    JSON.stringify(updated)
+  );
+
+  if (isFirebaseConfigured && db) {
     try {
-      const querySnap = await getDocs(collection(db, 'patent_novelty_analyses'));
-      const dbList = [];
-      querySnap.forEach((docSnap) => dbList.push(docSnap.data()));
-      if (dbList.length > 0) return dbList.sort((a, b) => new Date(b.analysisDate) - new Date(a.analysisDate));
+      await deleteDoc(
+        doc(
+          db,
+          'patent_novelty_analyses',
+          id
+        )
+      );
     } catch (e) {
-      console.warn('Firestore fetch novelty history notice:', e.message);
+      console.warn(
+        'Firestore delete novelty analysis error:',
+        e
+      );
     }
   }
 
-  return localData;
-};
-
-/**
- * Retrieves specific novelty analysis by ID.
- */
-export const getNoveltyAnalysisById = async (analysisId) => {
-  const history = await getNoveltyAnalysisHistory();
-  return history.find((item) => item.id === analysisId) || null;
-};
-
-
-export async function deleteNoveltyAnalysis(id) {
-  const localData = JSON.parse(localStorage.getItem('patentiq_novelty_analyses') || '[]');
-  const updated = localData.filter(x => x.id !== id);
-  localStorage.setItem('patentiq_novelty_analyses', JSON.stringify(updated));
-
-  if (isFirebaseConfigured() && db) {
-    try {
-      await deleteDoc(doc(db, 'patent_novelty_analyses', id));
-    } catch (e) {
-      console.warn("Firestore delete novelty analysis error:", e);
-    }
-  }
   return updated;
 }
