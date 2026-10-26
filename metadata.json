@@ -1,0 +1,8 @@
+{
+  "name": "Patentiq AI",
+  "description": "AI-powered patent novelty checker and prior art intelligence platform. Analyze patent novelty scores, perform semantic prior art search, compare claims, and generate automated novelty reports.",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
